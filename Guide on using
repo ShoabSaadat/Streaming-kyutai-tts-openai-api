@@ -1,0 +1,453 @@
+Help:
+https://youtu.be/PHFrchtDIoE
+
+or maybe:
+
+KokoroTTS & Whisper - Realtime Voice Chat Implementation Guide.md
+Introduction
+This guide provides a complete, end-to-end plan for building and deploying a real-time, streaming voice chat application. The architecture is designed for cost-effectiveness and performance by leveraging a self-hosted LiveKit server for real-time communication and locally deployed, CPU-based Machine Learning models for Speech-to-Text (STT) and Text-to-Speech (TTS).
+For STT, we will use OpenAI's Whisper model, which offers excellent accuracy and performs well on CPUs. For TTS, we will use KokoroTTS, a high-quality and efficient model specifically suited for CPU inference. Both models will be wrapped in a FastAPI service that exposes an OpenAI-compatible API. This modular design makes the ML backend easily swappable in the future.
+The chosen deployment strategy is a Hetzner CPU server managed by Dokploy. This provides a powerful and affordable environment for hosting the necessary Docker containers (LiveKit, ML Backend, and the web frontend).
+System Architecture
+The application consists of four primary, containerized components:
+ * Web Frontend (Django & JavaScript): A simple web interface where the user interacts with the voice agent. It connects to the LiveKit server to send and receive real-time audio.
+ * LiveKit Server: The core real-time infrastructure. It handles all WebSocket connections, audio/video streaming, and room management, ensuring low-latency communication between the user and the AI agent.
+ * LiveKit Agent: A Python application that acts as the "brain." It joins the LiveKit room as a participant, receives the user's audio stream, sends it to our local STT service for transcription, (optionally) processes the text with an LLM, sends the response text to our local TTS service, and streams the synthesized audio back into the room.
+ * ML Model Backend Service (FastAPI): A dedicated service hosting the CPU-optimized Whisper (STT) and KokoroTTS models. It exposes OpenAI-compatible endpoints (/v1/audio/transcriptions and /v1/audio/speech), allowing the LiveKit Agent to interact with them seamlessly.
+Part 1: The ML Model Backend Service
+This service is the core of our local AI capabilities. It's a FastAPI application that serves our STT and TTS models.
+1.1. Project Structure
+Create a directory named ml-backend-service with the following files and folders:
+ml-backend-service/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── stt_inference.py
+│   └── tts_inference.py
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+
+1.2. requirements.txt
+This file lists the necessary Python packages. We explicitly use the CPU-only versions of PyTorch to keep the container lightweight.
+# ml-backend-service/requirements.txt
+fastapi==0.111.0
+uvicorn==0.30.1
+gunicorn==22.0.0
+python-multipart==0.0.9
+torch==2.3.1+cpu
+torchaudio==2.3.1+cpu
+transformers==4.42.3
+optimum==1.21.0
+onnxruntime==1.18.0
+sentencepiece==0.2.0
+espeak-ng==0.1.0
+soundfile==0.12.1
+accelerate==0.31.0
+
+Justification: Using torch+cpu and torchaudio+cpu prevents the installation of large CUDA libraries, which are unnecessary for our CPU-only deployment. onnxruntime and optimum are included for high-performance Whisper inference on the CPU. espeak-ng is a critical dependency for KokoroTTS's phonemization process.
+1.3. app/stt_inference.py (Whisper STT)
+This module loads the Whisper model and provides a transcription function.
+# ml-backend-service/app/stt_inference.py
+from transformers import pipeline
+import torch
+import logging
+
+logger = logging.getLogger(__name__)
+
+class WhisperSTT:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(WhisperSTT, cls).__new__(cls)
+            logger.info("Initializing Whisper STT model (openai/whisper-base.en)...")
+            try:
+                # Using 'whisper-base.en' provides a good balance of speed and accuracy on CPU.
+                cls._instance.pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model="openai/whisper-base.en",
+                    chunk_length_s=30,
+                    device="cpu",
+                    torch_dtype=torch.float32,
+                )
+                logger.info("Whisper STT model loaded successfully.")
+            except Exception as e:
+                logger.error(f"Failed to load Whisper STT model: {e}", exc_info=True)
+                cls._instance.pipe = None
+        return cls._instance
+
+    def transcribe_audio(self, audio_bytes: bytes) -> str:
+        if not self.pipe:
+            raise RuntimeError("STT model is not available.")
+        
+        logger.info("Transcribing audio chunk...")
+        result = self.pipe(audio_bytes)
+        transcribed_text = result["text"].strip()
+        logger.info(f"Transcription result: '{transcribed_text}'")
+        return transcribed_text
+
+stt_model = WhisperSTT()
+
+1.4. app/tts_inference.py (KokoroTTS)
+This module handles KokoroTTS inference. Note: A real implementation requires downloading the KokoroTTS ONNX model files. This code provides a structural placeholder and guidance for the AI agent to complete.
+# ml-backend-service/app/tts_inference.py
+import torch
+import torchaudio
+import io
+import logging
+
+logger = logging.getLogger(__name__)
+
+class KokoroTTS:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(KokoroTTS, cls).__new__(cls)
+            # --- AI AGENT IMPLEMENTATION REQUIRED ---
+            # 1. Download the KokoroTTS ONNX model (e.g., from Hugging Face: hexgrad/Kokoro-82M).
+            # 2. Place the model files in a known directory within the container.
+            # 3. Load the ONNX model using onnxruntime.
+            # 4. Implement the text-to-phoneme preprocessing pipeline using espeak-ng.
+            # For this guide, we use a placeholder sine wave generator.
+            logger.info("Initializing KokoroTTS (Placeholder)...")
+            cls._instance.model_loaded = True
+        return cls._instance
+
+    def generate_speech(self, text: str, response_format: str = "mp3") -> bytes:
+        if not self.model_loaded:
+            raise RuntimeError("TTS model is not available.")
+
+        logger.info(f"Generating speech for text: '{text[:50]}...'")
+
+        # --- Placeholder Sine Wave Generation ---
+        # Replace this block with actual KokoroTTS ONNX inference.
+        sample_rate = 24000  # KokoroTTS typically uses 24kHz
+        duration_seconds = len(text.split()) * 0.4  # Approximate duration
+        t = torch.linspace(0, duration_seconds, int(duration_seconds * sample_rate))
+        waveform = 0.5 * torch.sin(2 * torch.pi * 440 * t)
+        
+        buffer = io.BytesIO()
+        torchaudio.save(buffer, waveform.unsqueeze(0), sample_rate, format=response_format)
+        buffer.seek(0)
+        logger.info("Speech generation complete.")
+        return buffer.getvalue()
+
+tts_model = KokoroTTS()
+
+1.5. app/main.py (FastAPI Server)
+This is the main application file that defines the API endpoints.
+# ml-backend-service/app/main.py
+import logging
+from fastapi import FastAPI, UploadFile, File, Form, Response
+
+from .stt_inference import stt_model
+from .tts_inference import tts_model
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Local CPU TTS/STT Service",
+    description="OpenAI-compatible API for Whisper (STT) and KokoroTTS (TTS).",
+)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+@app.post("/v1/audio/transcriptions")
+async def create_transcription(file: UploadFile = File(...)):
+    logger.info(f"Received transcription request for file: {file.filename}")
+    try:
+        audio_bytes = await file.read()
+        transcribed_text = stt_model.transcribe_audio(audio_bytes)
+        return {"text": transcribed_text}
+    except Exception as e:
+        logger.error(f"Transcription failed: {e}", exc_info=True)
+        return Response(content=f"Error: {e}", status_code=500)
+
+@app.post("/v1/audio/speech")
+async def create_speech(
+    input: str = Form(...),
+    model: str = Form("kokoro-tts"),
+    voice: str = Form("default"),
+    response_format: str = Form("mp3"),
+):
+    logger.info(f"Received speech request for input: '{input[:50]}...'")
+    try:
+        audio_content = tts_model.generate_speech(input, response_format)
+        media_type = f"audio/{response_format}"
+        return Response(content=audio_content, media_type=media_type)
+    except Exception as e:
+        logger.error(f"Speech generation failed: {e}", exc_info=True)
+        return Response(content=f"Error: {e}", status_code=500)
+
+1.6. Dockerfile
+This file defines the container for our ML service.
+# ml-backend-service/Dockerfile
+FROM python:3.10-slim-buster
+
+ENV PYTHONUNBUFFERED 1
+WORKDIR /app
+
+# Install system dependencies required for audio processing and TTS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    espeak-ng \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+COPY ./app ./app
+
+EXPOSE 8000
+
+# Use Gunicorn for production with a reasonable number of workers for a CPU server
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "app.main:app"]
+
+Justification: We use Gunicorn to manage Uvicorn workers, providing a robust, production-ready server. 4 workers is a good starting point for a typical multi-core CPU server on Hetzner, allowing for concurrent request handling.
+1.7. docker-compose.yml
+This file is used by Dokploy to deploy the service.
+# ml-backend-service/docker-compose.yml
+version: '3.8'
+
+services:
+  ml-backend:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount a volume to cache downloaded models between container restarts
+      - model_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  model_cache:
+
+Part 2: Frontend Integration (Django & JavaScript)
+This section details a minimal Django application to serve the web interface and handle LiveKit token generation.
+2.1. Django Setup
+Assume you have a Django project named voice_chat_project and an app named chat_app.
+chat_app/views.py:
+# voice_chat_project/chat_app/views.py
+import os
+from django.shortcuts import render
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+import json
+from livekit import jwt
+from datetime import timedelta
+
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET")
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL") # e.g., wss://your-livekit-url.com
+
+def index(request):
+    return render(request, 'chat_app/index.html')
+
+@csrf_exempt
+def generate_token(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required.'}, status=405)
+    
+    try:
+        body = json.loads(request.body)
+        participant_name = body.get('participantName')
+        room_name = body.get('roomName')
+
+        if not all([participant_name, room_name]):
+            return JsonResponse({'error': 'participantName and roomName are required.'}, status=400)
+        
+        token = jwt.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+                                identity=participant_name,
+                                ttl=timedelta(minutes=30))
+        grant = jwt.VideoGrant(room_join=True, room=room_name)
+        token.add_grant(grant)
+
+        return JsonResponse({'token': token.to_jwt(), 'url': LIVEKIT_URL})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+chat_app/urls.py:
+# voice_chat_project/chat_app/urls.py
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path('', views.index, name='index'),
+    path('generate-token', views.generate_token, name='generate-token'),
+]
+
+2.2. HTML Template
+chat_app/templates/chat_app/index.html:
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Realtime Voice Chat</title>
+    <style>
+        body { font-family: system-ui, sans-serif; display: grid; place-content: center; height: 100vh; margin: 0; background: #f0f0f0; }
+        .container { text-align: center; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        button { font-size: 1rem; padding: 0.5rem 1rem; margin: 0.5rem; border-radius: 5px; border: 1px solid #ccc; cursor: pointer; }
+        #status { font-weight: bold; color: #555; }
+        #transcript { margin-top: 1rem; text-align: left; background: #fafafa; padding: 1rem; border-radius: 5px; min-height: 100px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CPU-Powered Voice Agent</h1>
+        <p id="status">Status: Disconnected</p>
+        <button id="connectBtn">Connect</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+        <div id="transcript"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <script src="/static/chat_app/main.js"></script>
+</body>
+</html>
+
+2.3. JavaScript Client
+chat_app/static/chat_app/main.js:
+// chat_app/static/chat_app/main.js
+const { Room, RoomEvent } = livekit;
+
+const connectBtn = document.getElementById('connectBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const statusEl = document.getElementById('status');
+const transcriptEl = document.getElementById('transcript');
+
+let room;
+
+async function getToken(participantName, roomName) {
+    const response = await fetch('/generate-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participantName, roomName }),
+    });
+    const data = await response.json();
+    return data;
+}
+
+async function connectToRoom() {
+    statusEl.textContent = 'Status: Connecting...';
+    connectBtn.disabled = true;
+
+    try {
+        const { token, url } = await getToken('web-user', 'cpu-voice-chat');
+        room = new Room();
+        
+        await room.connect(url, token);
+
+        statusEl.textContent = 'Status: Connected. Publishing microphone...';
+
+        await room.localParticipant.setMicrophoneEnabled(true);
+        
+        statusEl.textContent = 'Status: Connected & Speaking!';
+        disconnectBtn.disabled = false;
+
+        room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+            if (track.kind === 'audio' && participant.identity.includes('agent')) {
+                const audioEl = track.attach();
+                document.body.appendChild(audioEl);
+            }
+        });
+        
+        room.on(RoomEvent.Disconnected, () => {
+            statusEl.textContent = 'Status: Disconnected';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            transcriptEl.innerHTML = '';
+        });
+
+    } catch (error) {
+        console.error("Connection failed:", error);
+        statusEl.textContent = 'Status: Connection Failed!';
+        connectBtn.disabled = false;
+    }
+}
+
+function disconnectFromRoom() {
+    if (room) {
+        room.disconnect();
+    }
+}
+
+connectBtn.addEventListener('click', connectToRoom);
+disconnectBtn.addEventListener('click', disconnectFromRoom);
+
+Part 3: Modular Architecture for Future Swapping
+This architecture is inherently modular:
+ * API Abstraction: By using an OpenAI-compatible API for the ml-backend-service, the LiveKit Agent is completely decoupled from the specific model implementations (Whisper, KokoroTTS). You could swap this service for a GPU-powered one running different models, or even a cloud service like OpenAI or Groq, simply by changing the target URL in the agent's configuration, with zero code changes to the agent itself.
+ * Containerization: Each component (Frontend, LiveKit Server, Agent, ML Backend) is a separate Docker container. This isolation allows you to update, scale, or replace any single component without impacting the others. For example, you could update the Whisper model in the ML backend and redeploy it, and the rest of the system would continue to function seamlessly.
+Part 4: Troubleshooting Guide
+| Problem | Symptom | Solution |
+|---|---|---|
+| Connection Failed | Frontend shows "Connection Failed!" status. | 1. Check LiveKit Server: Ensure your LiveKit server container is running and healthy in Dokploy. 2. Check Django Backend: Ensure the Django app is running and the /generate-token endpoint is working. Check Django logs for errors. 3. Check Environment Variables: Verify LIVEKIT_API_KEY, SECRET, and URL are correctly set for the Django app in Dokploy. |
+| Agent is silent | User connects, but no audio is heard back from the agent. | 1. Check Agent Logs: Verify the LiveKit agent is connecting to the room and not reporting errors. 2. Check ML Backend Logs: Inspect the ml-backend-service logs. Look for errors during STT transcription or TTS generation. 3. Check Agent <-> ML Backend Connection: Ensure the agent's environment variable for the ML backend URL is correct and the containers can communicate (check Docker networking). |
+| High Latency | There is a long delay between the user speaking and the agent responding. | 1. Monitor Server CPU: Use htop or Dokploy's monitoring to check if the CPU is maxed out. If so, your Hetzner server may be underpowered. 2. Optimize Models: Ensure you are using a small, efficient Whisper model (like base.en). For KokoroTTS, ensure the ONNX implementation is correct. 3. Check Network: A slow network connection between services can add latency. |
+| Garbled Audio Output | The agent's speech is distorted or sounds like noise. | 1. Check Sample Rates: Ensure the sample rate of the audio generated by the TTS model matches what the LiveKit agent/client expects. Discrepancies can cause distortion. 2. Check Audio Format: Verify the response_format (e.g., 'mp3', 'wav') is correctly handled by both the TTS service and the LiveKit agent. |
+Part 5: Edge Cases & Advanced Considerations
+ * Concurrent Users: LiveKit's server is designed to handle high concurrency. The bottleneck will be your ML Backend Service. The Gunicorn worker configuration is the primary lever for handling more users. If one server isn't enough, you can deploy multiple instances of the ml-backend-service behind a load balancer and have your agents connect to the load balancer's address.
+ * Long TTS Inputs: For long text responses from an LLM, the TTS generation could be slow. The LiveKit agent should chunk the text into sentences, send each sentence to the TTS API sequentially, and stream the resulting audio chunks back to LiveKit to create a continuous, low-latency audio stream.
+ * Voice Activity Detection (VAD): To prevent transcribing background noise or silence, the LiveKit agent should use a VAD library (e.g., Silero VAD). This ensures the STT service is only invoked when the user is actually speaking, saving significant CPU resources.
+ * Model Quantization: To further improve performance on CPU, you can use quantized versions of the Whisper model (e.g., using a library like ctranslate2). This can dramatically reduce memory usage and increase inference speed with a minimal loss in accuracy.
+Part 6: In-Depth Troubleshooting
+ * Direct API Testing: If the agent isn't working, bypass it and test the ml-backend-service directly. Use curl or a tool like Postman to send an audio file to the /v1/audio/transcriptions endpoint and a text payload to /v1/audio/speech. This isolates whether the problem is in the ML service or the agent's integration.
+   # Test STT
+curl -X POST -F "file=@/path/to/myaudio.wav" http://YOUR_SERVER_IP:8000/v1/audio/transcriptions
+
+# Test TTS
+curl -X POST -d "input=hello world" -d "model=kokoro-tts" http://YOUR_SERVER_IP:8000/v1/audio/speech --output response.mp3
+
+ * Container Networking: Within Dokploy (or any Docker setup), containers on the same Docker network can communicate using their service names. For example, the LiveKit agent could reach the ML backend at http://ml-backend:8000 instead of using the host's public IP. This is more secure and efficient. Check that all relevant services are attached to the same custom Docker network.
+ * LiveKit CLI: Use the livekit-cli tool to inspect your running LiveKit rooms. You can see which participants are connected (including your agent), what tracks they are publishing, and other useful diagnostic information.
+Part 7: Best Practices
+ * Configuration via Environment Variables: Never hardcode URLs, API keys, or secrets in your code. Use environment variables for everything, and manage them using Dokploy's secrets management.
+ * Health Checks: The /health endpoint is crucial. Configure Dokploy to use this endpoint for your ml-backend-service and Django app. Dokploy can then automatically restart containers that fail their health checks.
+ * Structured Logging: Configure Gunicorn and your FastAPI application to output logs in a structured format (like JSON). This makes them much easier to parse, search, and analyze in a centralized logging platform.
+ * Resource Limits: In your docker-compose.yml or Dokploy configuration, set resource limits (CPU and memory) for your containers. This prevents a single runaway service from consuming all server resources and crashing the entire system.
+Part 8: Resources & Further Reading
+ * LiveKit Documentation: https://docs.livekit.io
+ * LiveKit Agents Framework: https://github.com/livekit/agents
+ * FastAPI Documentation: https://fastapi.tiangolo.com
+ * KokoroTTS Model Card: https://huggingface.co/hexgrad/Kokoro-82M
+ * Whisper Model on Hugging Face: https://huggingface.co/openai/whisper-base.en
+ * Dokploy Documentation: https://dokploy.com/docs
+ * Hetzner Cloud: https://www.hetzner.com/cloud
+Part 9: Pre-flight Checklist & Deployment Workflow
+ * [ ] Hetzner Server: Provision a Hetzner Cloud server (e.g., a CPX31 or higher is a good starting point).
+ * [ ] Dokploy Installed: Install Dokploy on the server.
+ * [ ] Domain & DNS: Point a domain name to your server's IP address.
+ * [ ] Deploy LiveKit: Use Dokploy's one-click marketplace app or a custom Docker Compose to deploy the LiveKit server. Note your API Key, Secret, and URL.
+ * [ ] Prepare ML Backend: Push your ml-backend-service directory to a GitHub repository.
+ * [ ] Deploy ML Backend: In Dokploy, create a new application, connect it to your GitHub repo, and configure it to build from the Dockerfile. Expose port 8000.
+ * [ ] Prepare Django App: Push your Django project to a separate GitHub repository.
+ * [ ] Deploy Django App: In Dokploy, create another application for Django. Set the LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and LIVEKIT_URL environment variables.
+ * [ ] Deploy LiveKit Agent: In Dokploy, deploy your LiveKit Agent container. Set environment variables to point to your LiveKit server and your ml-backend-service URL (http://ml-backend:8000).
+ * [ ] Final Test: Access your Django application's domain, click connect, and verify the entire audio pipeline is working.
+Part 10: Monitoring, Logging, and Maintenance
+ * Monitoring: Use Dokploy's built-in monitoring dashboard to keep an eye on CPU, memory, and disk usage for all your containers. Set up alerts for high resource utilization.
+ * Logging: Configure all your Docker containers to use a logging driver that sends logs to a central location (e.g., Dokploy's log viewer, or an external service like Logtail or Papertrail).
+ * Maintenance:
+   * Weekly: Check for security updates for your base Docker images (python:3.10-slim-buster) and system packages (apt-get).
+   * Monthly: Review your Python dependencies (requirements.txt) for updates and security vulnerabilities using a tool like pip-audit.
+   * Quarterly: Check for new versions of the LiveKit server, KokoroTTS, and Whisper models.
+Part 11: Security Hardening
+ * Non-Root Containers: Modify your Dockerfile to create and run as a non-root user. This is a critical security best practice that limits the potential damage of a container breakout.
+   # Add after apt-get install
+RUN adduser --system --group appuser
+USER appuser
+
+ * Hetzner Firewall: Use the Hetzner Cloud Firewall to restrict incoming traffic. Only open the necessary ports to the public (e.g., 443 for web, and the required ports for LiveKit). All other communication, like between the agent and the ML backend, should happen over the internal Docker network and not be exposed publicly.
+ * Rate Limiting: If any part of your service is exposed to the public internet, use a reverse proxy like Nginx (which Dokploy can manage) to implement rate limiting to protect against denial-of-service attacks.
+ * Secrets Management: Use Dokploy's built-in secrets management for all sensitive information. Do not store API keys, passwords, or other secrets in your Git repository.
+Part 12: Keeping Up-to-Date
+The AI and real-time communication space moves quickly. To keep your application modern and secure:
+ * Watch Repositories: Use GitHub's "Watch" feature on the key repositories (LiveKit, FastAPI, Transformers) to be notified of new releases.
+ * Automate Dependency Updates: Use a tool like Dependabot or Renovate in your GitHub repository. It will automatically create pull requests to update your requirements.txt when new versions of your dependencies are released, allowing you to test and merge them safely.
+ * Staging Environment: Before deploying updates to production, maintain a separate staging environment in Dokploy. Deploy all changes there first to test for regressions or unexpected issues. This ensures your production service remains stable.
